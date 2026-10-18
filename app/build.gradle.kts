@@ -11,8 +11,8 @@ android {
         applicationId = "com.nova.assistant"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
     }
 
     buildTypes {
@@ -55,4 +55,6 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.2")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")
+
+    implementation("com.alphacephei:vosk-android:0.3.75")
 }
