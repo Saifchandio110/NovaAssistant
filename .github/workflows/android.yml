@@ -25,6 +25,15 @@ jobs:
       - name: Accept Android SDK licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
+      - name: Download Vosk speech model
+        run: |
+          mkdir -p app/src/main/assets
+          curl -L --fail -o model.zip https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
+          unzip -q model.zip
+          mv vosk-model-small-en-us-0.15 app/src/main/assets/model
+          rm model.zip
+          ls app/src/main/assets/model
+
       - name: Set up Gradle 8.7
         uses: gradle/actions/setup-gradle@v4
         with:
