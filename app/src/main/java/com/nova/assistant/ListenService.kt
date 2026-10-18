@@ -40,6 +40,8 @@ class ListenService : Service() {
     private var status = "Starting"
     private var engine: WakeWordEngine? = null
     private var tone: ToneGenerator? = null
+    private var tts: TtsManager? = null
+    private var runner: ActionRunner? = null
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -68,6 +70,8 @@ class ListenService : Service() {
                 )
                 running = true
                 lastError = null
+                runner = ActionRunner(applicationContext)
+                tts = TtsManager(applicationContext)
                 handler.postDelayed(ticker, 60_000)
                 startEngine()
             } catch (e: Exception) {
@@ -82,6 +86,7 @@ class ListenService : Service() {
         engine = WakeWordEngine(
             context = applicationContext,
             onWake = { handler.post { handleWake() } },
+            onCommand = { text -> handler.post { handleCommand(text) } },
             onStatus = { text ->
                 handler.post {
                     status = text
@@ -97,17 +102,53 @@ class ListenService : Service() {
         ).also { it.start() }
     }
 
-    private fun handleWake() {
-        wakeCount++
-        val time = LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"))
-        status = "Heard \"hey nova\" #$wakeCount at $time"
+    private fun beep(toneType: Int) {
         try {
             if (tone == null) tone = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 80)
-            tone?.startTone(ToneGenerator.TONE_PROP_BEEP, 200)
+            tone?.startTone(toneType, 200)
         } catch (e: RuntimeException) {
             // Beep is optional; ignore failures.
         }
+    }
+
+    private fun handleWake() {
+        wakeCount++
+        status = "Heard \"hey nova\" #$wakeCount. Say your command now"
+        beep(ToneGenerator.TONE_PROP_BEEP)
         updateNotification()
+    }
+
+    private fun execute(text: String): ActionOutcome {
+        val r = runner ?: return ActionOutcome("Service is not ready.", false)
+        return when (val result = CommandParser.parse(text)) {
+            is CommandResult.Reply -> ActionOutcome(result.text, true)
+            is CommandResult.OpenApp -> r.openApp(result.query)
+            is CommandResult.SetAlarm -> r.setAlarm(result.hour, result.minute, result.label)
+            is CommandResult.SetTimer -> r.setTimer(result.seconds, result.label)
+            CommandResult.Unrecognized -> ActionOutcome(
+                "I heard \"$text\" but I only know local commands: open apps, alarms, timers, time and date.",
+                false
+            )
+        }
+    }
+
+    private fun handleCommand(text: String) {
+        if (text.isBlank()) {
+            status = "Didn't hear a command. Listening for \"hey nova\""
+            beep(ToneGenerator.TONE_PROP_NACK)
+            updateNotification()
+            return
+        }
+        val outcome = execute(text)
+        val time = LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"))
+        status = "$time You: \"$text\" -> ${outcome.message.take(90)}"
+        updateNotification()
+        val spoken = if (outcome.message.length > 140) {
+            "I can open apps, set alarms and timers, and tell the time."
+        } else {
+            outcome.message
+        }
+        tts?.speak(spoken)
     }
 
     private fun shutDown() {
@@ -117,6 +158,8 @@ class ListenService : Service() {
         running = false
         tone?.release()
         tone = null
+        tts?.shutdown()
+        tts = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -128,6 +171,8 @@ class ListenService : Service() {
         running = false
         tone?.release()
         tone = null
+        tts?.shutdown()
+        tts = null
         super.onDestroy()
     }
 
@@ -150,6 +195,7 @@ class ListenService : Service() {
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentTitle("Nova Assistant")
             .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
