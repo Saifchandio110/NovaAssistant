@@ -53,6 +53,8 @@ class WakeWordEngine(
     @Volatile
     private var running = false
 
+    private val wakeLooksRight = Regex("""\b(nova|no va|novo|nover)\b""")
+
     fun start() {
         if (running) return
         running = true
@@ -63,19 +65,31 @@ class WakeWordEngine(
         running = false
     }
 
-    private fun extractText(json: String): String {
-        val text = try {
-            JSONObject(json).optString("text", "")
+    private fun rawText(json: String): String {
+        return try {
+            JSONObject(json).optString("text", "").trim()
         } catch (e: Exception) {
             ""
         }
-        return text.trim().removePrefix("hey nova").trim()
+    }
+
+    private fun extractText(json: String): String {
+        return rawText(json).removePrefix("hey nova").trim()
+    }
+
+    private fun verify(rec: Recognizer, chunks: List<ShortArray>): String {
+        rec.reset()
+        for (c in chunks) {
+            rec.acceptWaveForm(c, c.size)
+        }
+        return rawText(rec.finalResult)
     }
 
     @SuppressLint("MissingPermission")
     private fun loop() {
         var model: Model? = null
         var wakeRec: Recognizer? = null
+        var verifyRec: Recognizer? = null
         var cmdRec: Recognizer? = null
         var audio: AudioRecord? = null
         try {
@@ -83,6 +97,7 @@ class WakeWordEngine(
             val dir = ModelInstaller.ensureInstalled(context)
             model = Model(dir.absolutePath)
             wakeRec = Recognizer(model, 16000.0f, "[\"hey nova\", \"[unk]\"]")
+            verifyRec = Recognizer(model, 16000.0f)
             cmdRec = Recognizer(model, 16000.0f)
 
             val sampleRate = 16000
@@ -106,6 +121,7 @@ class WakeWordEngine(
             onStatus("Listening for \"hey nova\"")
 
             val buffer = ShortArray(4096)
+            val history = ArrayDeque<ShortArray>()
             var lastWake = 0L
             var commandMode = false
             var commandStart = 0L
@@ -116,17 +132,26 @@ class WakeWordEngine(
                 if (read == 0) continue
 
                 if (!commandMode) {
+                    history.addLast(buffer.copyOf(read))
+                    while (history.size > 12) history.removeFirst()
+
                     val accepted = wakeRec.acceptWaveForm(buffer, read)
-                    val json = if (accepted) wakeRec.result else wakeRec.partialResult
-                    if (json.contains("hey nova")) {
-                        wakeRec.reset()
-                        val now = SystemClock.elapsedRealtime()
-                        if (now - lastWake > 3000) {
-                            lastWake = now
-                            cmdRec.reset()
-                            commandMode = true
-                            commandStart = now
-                            onWake()
+                    if (accepted) {
+                        val json = wakeRec.result
+                        if (json.contains("hey nova")) {
+                            val now = SystemClock.elapsedRealtime()
+                            val heard = verify(verifyRec, history.toList())
+                            if (wakeLooksRight.containsMatchIn(heard) && now - lastWake > 3000) {
+                                lastWake = now
+                                history.clear()
+                                cmdRec.reset()
+                                commandMode = true
+                                commandStart = now
+                                onWake()
+                            } else if (now - lastWake > 3000) {
+                                onStatus("Ignored a false trigger (heard: \"$heard\"). Listening for \"hey nova\"")
+                            }
+                            wakeRec.reset()
                         }
                     }
                 } else {
@@ -139,6 +164,7 @@ class WakeWordEngine(
                         } else {
                             cmdRec.reset()
                             wakeRec.reset()
+                            history.clear()
                             commandMode = false
                             lastWake = SystemClock.elapsedRealtime()
                             onCommand(text)
@@ -158,6 +184,7 @@ class WakeWordEngine(
             }
             audio?.release()
             cmdRec?.close()
+            verifyRec?.close()
             wakeRec?.close()
             model?.close()
         }
