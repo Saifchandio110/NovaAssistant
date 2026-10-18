@@ -6,6 +6,7 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.SystemClock
+import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
 import java.io.File
@@ -45,6 +46,7 @@ object ModelInstaller {
 class WakeWordEngine(
     private val context: Context,
     private val onWake: () -> Unit,
+    private val onCommand: (String) -> Unit,
     private val onStatus: (String) -> Unit,
     private val onError: (String) -> Unit
 ) {
@@ -61,16 +63,27 @@ class WakeWordEngine(
         running = false
     }
 
+    private fun extractText(json: String): String {
+        val text = try {
+            JSONObject(json).optString("text", "")
+        } catch (e: Exception) {
+            ""
+        }
+        return text.trim().removePrefix("hey nova").trim()
+    }
+
     @SuppressLint("MissingPermission")
     private fun loop() {
         var model: Model? = null
-        var recognizer: Recognizer? = null
+        var wakeRec: Recognizer? = null
+        var cmdRec: Recognizer? = null
         var audio: AudioRecord? = null
         try {
             onStatus("Loading speech model (first time takes a while)")
             val dir = ModelInstaller.ensureInstalled(context)
             model = Model(dir.absolutePath)
-            recognizer = Recognizer(model, 16000.0f, "[\"hey nova\", \"[unk]\"]")
+            wakeRec = Recognizer(model, 16000.0f, "[\"hey nova\", \"[unk]\"]")
+            cmdRec = Recognizer(model, 16000.0f)
 
             val sampleRate = 16000
             val minBuffer = AudioRecord.getMinBufferSize(
@@ -94,18 +107,42 @@ class WakeWordEngine(
 
             val buffer = ShortArray(4096)
             var lastWake = 0L
+            var commandMode = false
+            var commandStart = 0L
+
             while (running) {
                 val read = audio.read(buffer, 0, buffer.size)
                 if (read < 0) throw IllegalStateException("Microphone read error (code $read)")
                 if (read == 0) continue
-                val accepted = recognizer.acceptWaveForm(buffer, read)
-                val json = if (accepted) recognizer.result else recognizer.partialResult
-                if (json.contains("hey nova")) {
-                    recognizer.reset()
-                    val now = SystemClock.elapsedRealtime()
-                    if (now - lastWake > 3000) {
-                        lastWake = now
-                        onWake()
+
+                if (!commandMode) {
+                    val accepted = wakeRec.acceptWaveForm(buffer, read)
+                    val json = if (accepted) wakeRec.result else wakeRec.partialResult
+                    if (json.contains("hey nova")) {
+                        wakeRec.reset()
+                        val now = SystemClock.elapsedRealtime()
+                        if (now - lastWake > 3000) {
+                            lastWake = now
+                            cmdRec.reset()
+                            commandMode = true
+                            commandStart = now
+                            onWake()
+                        }
+                    }
+                } else {
+                    val accepted = cmdRec.acceptWaveForm(buffer, read)
+                    val timedOut = SystemClock.elapsedRealtime() - commandStart > 8000
+                    if (accepted || timedOut) {
+                        val text = extractText(if (accepted) cmdRec.result else cmdRec.finalResult)
+                        if (text.isBlank() && !timedOut) {
+                            cmdRec.reset()
+                        } else {
+                            cmdRec.reset()
+                            wakeRec.reset()
+                            commandMode = false
+                            lastWake = SystemClock.elapsedRealtime()
+                            onCommand(text)
+                        }
                     }
                 }
             }
@@ -120,7 +157,8 @@ class WakeWordEngine(
             } catch (ignored: Exception) {
             }
             audio?.release()
-            recognizer?.close()
+            cmdRec?.close()
+            wakeRec?.close()
             model?.close()
         }
     }
